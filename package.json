@@ -2,7 +2,6 @@
   "name": "musashi-api",
   "version": "1.0.0",
   "description": "Standalone Musashi API, SDK, and backend services for prediction market intelligence.",
-  "type": "module",
   "packageManager": "pnpm@10.17.1",
   "scripts": {
     "dev": "node --import tsx scripts/local-api-server.ts",
