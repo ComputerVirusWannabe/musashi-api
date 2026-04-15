@@ -23,6 +23,7 @@ const BASE_URL = (process.env.MUSASHI_API_BASE_URL || 'https://musashi-api.verce
 const ADMIN_KEY = process.env.API_USAGE_ADMIN_KEY;
 const VERCEL_AUTOMATION_BYPASS_SECRET = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 const CLIENT_ID = process.env.MUSASHI_TEST_CLIENT_ID || `agent-api-test-${Date.now()}`;
+const TEST_WALLET = process.env.MUSASHI_TEST_WALLET || '0x0000000000000000000000000000000000000000';
 const TIMEOUT_MS = readIntEnv('MUSASHI_TEST_TIMEOUT_MS', 15000);
 const LATENCY_SAMPLE_SIZE = readIntEnv('MUSASHI_TEST_LATENCY_SAMPLES', 20);
 const INCLUDE_PERF =
@@ -89,6 +90,18 @@ async function main(): Promise<void> {
     { name: 'feed OPTIONS preflight', run: testFeedOptions },
     { name: 'feed stats happy path', run: testFeedStatsHappyPath },
     { name: 'feed accounts contract', run: testFeedAccounts },
+    { name: 'wallet activity happy path', run: testWalletActivityHappyPath },
+    { name: 'wallet activity rejects invalid wallet', run: testWalletActivityInvalidWallet },
+    { name: 'wallet activity rejects invalid limit', run: testWalletActivityInvalidLimit },
+    { name: 'wallet activity rejects invalid since', run: testWalletActivityInvalidSince },
+    { name: 'wallet activity OPTIONS preflight', run: testWalletActivityOptions },
+    { name: 'wallet positions happy path', run: testWalletPositionsHappyPath },
+    { name: 'wallet positions rejects invalid wallet', run: testWalletPositionsInvalidWallet },
+    { name: 'wallet positions rejects invalid limit', run: testWalletPositionsInvalidLimit },
+    { name: 'wallet positions rejects invalid minValue', run: testWalletPositionsInvalidMinValue },
+    { name: 'wallet positions OPTIONS preflight', run: testWalletPositionsOptions },
+    { name: 'sdk wallet activity surfaces validation errors', run: testSdkWalletActivityInvalidWallet },
+    { name: 'sdk wallet positions surfaces validation errors', run: testSdkWalletPositionsInvalidWallet },
     { name: 'cache-control headers are present on cacheable endpoints', run: testCacheHeaders },
     { name: 'error responses do not leak sensitive internals', run: testErrorLeakage },
   ];
@@ -832,6 +845,120 @@ async function testFeedAccounts(): Promise<CaseResult> {
   return pass(`returned ${response.json.data.count} accounts`);
 }
 
+async function testWalletActivityHappyPath(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/activity?wallet=${TEST_WALLET}&limit=1`);
+
+  if (response.status === 503) return warn(extractError(response));
+
+  expect(response.status === 200, `expected 200, got ${response.status}`);
+  expect(response.json.success === true, 'wallet activity success must be true');
+  validateWalletActivityResponse(response);
+  return pass(`returned ${response.json.data.count} activity item(s)`);
+}
+
+async function testWalletActivityInvalidWallet(): Promise<CaseResult> {
+  const response = await request('/api/wallet/activity?wallet=abc123');
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet activity invalid wallet');
+  return pass(extractError(response));
+}
+
+async function testWalletActivityInvalidLimit(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/activity?wallet=${TEST_WALLET}&limit=0`);
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet activity invalid limit');
+  return pass(extractError(response));
+}
+
+async function testWalletActivityInvalidSince(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/activity?wallet=${TEST_WALLET}&since=not-a-date`);
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet activity invalid since');
+  return pass(extractError(response));
+}
+
+async function testWalletActivityOptions(): Promise<CaseResult> {
+  const response = await request('/api/wallet/activity', {
+    method: 'OPTIONS',
+  });
+
+  expect([200, 204].includes(response.status), `expected 200 or 204, got ${response.status}`);
+  expect(
+    response.headers.get('access-control-allow-methods')?.includes('GET') === true,
+    'wallet activity preflight should advertise GET',
+  );
+  return pass(`preflight status ${response.status}`);
+}
+
+async function testWalletPositionsHappyPath(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/positions?wallet=${TEST_WALLET}&limit=1&minValue=0`);
+
+  if (response.status === 503) return warn(extractError(response));
+
+  expect(response.status === 200, `expected 200, got ${response.status}`);
+  expect(response.json.success === true, 'wallet positions success must be true');
+  validateWalletPositionsResponse(response);
+  return pass(`returned ${response.json.data.count} position(s)`);
+}
+
+async function testWalletPositionsInvalidWallet(): Promise<CaseResult> {
+  const response = await request('/api/wallet/positions?wallet=abc123');
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet positions invalid wallet');
+  return pass(extractError(response));
+}
+
+async function testWalletPositionsInvalidLimit(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/positions?wallet=${TEST_WALLET}&limit=101`);
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet positions invalid limit');
+  return pass(extractError(response));
+}
+
+async function testWalletPositionsInvalidMinValue(): Promise<CaseResult> {
+  const response = await request(`/api/wallet/positions?wallet=${TEST_WALLET}&minValue=-1`);
+  expect(response.status === 400, `expected 400, got ${response.status}`);
+  assertNoSensitiveLeak(response, 'wallet positions invalid minValue');
+  return pass(extractError(response));
+}
+
+async function testWalletPositionsOptions(): Promise<CaseResult> {
+  const response = await request('/api/wallet/positions', {
+    method: 'OPTIONS',
+  });
+
+  expect([200, 204].includes(response.status), `expected 200 or 204, got ${response.status}`);
+  expect(
+    response.headers.get('access-control-allow-methods')?.includes('GET') === true,
+    'wallet positions preflight should advertise GET',
+  );
+  return pass(`preflight status ${response.status}`);
+}
+
+async function testSdkWalletActivityInvalidWallet(): Promise<CaseResult> {
+  const agent = new MusashiAgent(BASE_URL);
+
+  try {
+    await agent.getWalletActivity('abc123');
+  } catch (error) {
+    return pass(toErrorMessage(error));
+  }
+
+  return fail('sdk wallet activity accepted invalid wallet');
+}
+
+async function testSdkWalletPositionsInvalidWallet(): Promise<CaseResult> {
+  const agent = new MusashiAgent(BASE_URL);
+
+  try {
+    await agent.getWalletPositions('abc123');
+  } catch (error) {
+    return pass(toErrorMessage(error));
+  }
+
+  return fail('sdk wallet positions accepted invalid wallet');
+}
+
 async function testCacheHeaders(): Promise<CaseResult> {
   const responses = await Promise.all([
     request('/api/feed?limit=1'),
@@ -855,6 +982,8 @@ async function testErrorLeakage(): Promise<CaseResult> {
     }),
     request('/api/feed?limit=-1'),
     request('/api/markets/arbitrage?minSpread=-1'),
+    request('/api/wallet/activity?wallet=abc123'),
+    request('/api/wallet/positions?wallet=abc123'),
   ]);
 
   for (const response of responses) {
@@ -1551,6 +1680,67 @@ function validateAccountsResponse(response: HttpResult): void {
     ].includes(account.category), 'account category invalid');
     expect(['high', 'medium'].includes(account.priority), 'account priority invalid');
   }
+}
+
+function validateWalletActivityResponse(response: HttpResult): void {
+  expect(response.headers.get('content-type')?.includes('application/json') === true, 'wallet activity content-type must be json');
+  expect(Array.isArray(response.json.data?.activity), 'wallet activity must be an array');
+  expect(response.json.data.count === response.json.data.activity.length, 'wallet activity count should match activity length');
+  expectIsoTimestamp(response.json.timestamp, 'wallet activity timestamp must be valid ISO');
+  validateWalletMetadata(response, 'wallet activity');
+
+  for (const item of response.json.data.activity as any[]) {
+    expect(typeof item.wallet === 'string' && item.wallet.startsWith('0x'), 'activity wallet missing');
+    expect(item.platform === 'polymarket', 'activity platform must be polymarket');
+    expect([
+      'trade',
+      'position_opened',
+      'position_increased',
+      'position_reduced',
+      'position_closed',
+      'redeemed',
+      'unknown',
+    ].includes(item.activityType), 'activity type invalid');
+    expectIsoTimestamp(item.timestamp, 'activity timestamp must be valid ISO');
+    if (item.side !== undefined) expect(['buy', 'sell'].includes(item.side), 'activity side invalid');
+    if (item.price !== undefined) expect(typeof item.price === 'number', 'activity price must be number');
+    if (item.size !== undefined) expect(typeof item.size === 'number', 'activity size must be number');
+    if (item.value !== undefined) expect(typeof item.value === 'number', 'activity value must be number');
+  }
+}
+
+function validateWalletPositionsResponse(response: HttpResult): void {
+  expect(response.headers.get('content-type')?.includes('application/json') === true, 'wallet positions content-type must be json');
+  expect(Array.isArray(response.json.data?.positions), 'wallet positions must be an array');
+  expect(response.json.data.count === response.json.data.positions.length, 'wallet positions count should match positions length');
+  expectIsoTimestamp(response.json.timestamp, 'wallet positions timestamp must be valid ISO');
+  validateWalletMetadata(response, 'wallet positions');
+
+  for (const item of response.json.data.positions as any[]) {
+    expect(typeof item.wallet === 'string' && item.wallet.startsWith('0x'), 'position wallet missing');
+    expect(item.platform === 'polymarket', 'position platform must be polymarket');
+    expect(typeof item.marketTitle === 'string' && item.marketTitle.length > 0, 'position market title missing');
+    expect(typeof item.outcome === 'string' && item.outcome.length > 0, 'position outcome missing');
+    expect(typeof item.quantity === 'number', 'position quantity must be number');
+    expectIsoTimestamp(item.updatedAt, 'position updatedAt must be valid ISO');
+    if (item.averagePrice !== undefined) expect(typeof item.averagePrice === 'number', 'position averagePrice must be number');
+    if (item.currentPrice !== undefined) expect(typeof item.currentPrice === 'number', 'position currentPrice must be number');
+    if (item.currentValue !== undefined) expect(typeof item.currentValue === 'number', 'position currentValue must be number');
+    if (item.realizedPnl !== undefined) expect(typeof item.realizedPnl === 'number', 'position realizedPnl must be number');
+    if (item.unrealizedPnl !== undefined) expect(typeof item.unrealizedPnl === 'number', 'position unrealizedPnl must be number');
+  }
+}
+
+function validateWalletMetadata(response: HttpResult, label: string): void {
+  expect(response.json.filters?.wallet === response.json.metadata?.wallet, `${label} metadata wallet should match filters`);
+  expect(response.json.metadata?.source === 'polymarket', `${label} source must be polymarket`);
+  expect(typeof response.json.metadata?.processing_time_ms === 'number', `${label} processing_time_ms must be number`);
+  expect(typeof response.json.metadata?.cached === 'boolean', `${label} cached must be boolean`);
+  expect(
+    response.json.metadata?.cache_age_seconds === null ||
+      typeof response.json.metadata?.cache_age_seconds === 'number',
+    `${label} cache_age_seconds must be number or null`,
+  );
 }
 
 function validateMarketMatch(match: any): void {
