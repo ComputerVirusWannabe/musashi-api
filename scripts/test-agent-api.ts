@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import test, { before, type TestContext } from 'node:test';
 
 type Level = 'pass' | 'warn' | 'fail';
 
@@ -10,6 +11,8 @@ interface CaseResult {
   level: Level;
   detail: string;
 }
+
+type AgentApiTestCaseRun = () => Promise<CaseResult>;
 
 interface HttpResult {
   status: number;
@@ -35,127 +38,124 @@ const COLD_SAMPLE_SIZE = readIntEnv('MUSASHI_TEST_COLD_SAMPLES', 10);
 const INCLUDE_STRESS = process.env.MUSASHI_TEST_INCLUDE_STRESS === '1';
 const CONCURRENCY_LEVEL = readIntEnv('MUSASHI_TEST_CONCURRENCY', 20);
 const BURST_REQUESTS = readIntEnv('MUSASHI_TEST_BURST_REQUESTS', 50);
+const CASE_TIMEOUT_MS = readIntEnv('MUSASHI_TEST_CASE_TIMEOUT_MS', 300000);
 const COOKIE_JAR_PATH = join(mkdtempSync(join(tmpdir(), 'musashi-agent-api-')), 'cookies.txt');
+const AGENT_API_TEST_OPTIONS = {
+  concurrency: false,
+  timeout: CASE_TIMEOUT_MS,
+};
+const ADMIN_KEY_REQUIRED_SKIP = ADMIN_KEY ? false : 'set API_USAGE_ADMIN_KEY to run this usage audit test';
+const ADMIN_KEY_MISSING_SKIP = ADMIN_KEY ? 'unset API_USAGE_ADMIN_KEY to run this missing-key test' : false;
+const PERF_SKIP = INCLUDE_PERF ? false : 'set MUSASHI_TEST_INCLUDE_PERF=1 to run performance probes';
+const STRESS_SKIP = INCLUDE_STRESS ? false : 'set MUSASHI_TEST_INCLUDE_STRESS=1 to run stress probes';
 
 installCurlBackedFetch();
 
-async function main(): Promise<void> {
-  const tests: Array<{ name: string; run: () => Promise<CaseResult> }> = [
-    { name: 'health endpoint contract', run: testHealthEndpoint },
-    { name: 'sdk health smoke test', run: testSdkHealth },
-    { name: 'health response headers', run: testHealthHeaders },
-    { name: 'method matrix for public endpoints', run: testMethodMatrix },
-    { name: 'analyze-text OPTIONS preflight', run: testAnalyzeTextOptions },
-    { name: 'analyze-text happy path', run: testAnalyzeTextHappyPath },
-    { name: 'analyze-text accepts no-match text gracefully', run: testAnalyzeTextNoMatch },
-    { name: 'analyze-text rejects GET', run: testAnalyzeTextMethodGuard },
-    { name: 'analyze-text rejects missing text', run: testAnalyzeTextMissingText },
-    { name: 'analyze-text rejects empty string', run: testAnalyzeTextEmptyString },
-    { name: 'analyze-text handles whitespace-only text safely', run: testAnalyzeTextWhitespaceOnly },
-    { name: 'analyze-text rejects null body payload', run: testAnalyzeTextNullBody },
-    { name: 'analyze-text rejects array body payload', run: testAnalyzeTextArrayBody },
-    { name: 'analyze-text rejects object text payload', run: testAnalyzeTextObjectText },
-    { name: 'analyze-text rejects NaN minConfidence', run: testAnalyzeTextNaNMinConfidence },
-    { name: 'analyze-text rejects Infinity minConfidence', run: testAnalyzeTextInfinityMinConfidence },
-    { name: 'analyze-text rejects invalid minConfidence', run: testAnalyzeTextInvalidMinConfidence },
-    { name: 'analyze-text rejects invalid maxResults', run: testAnalyzeTextInvalidMaxResults },
-    { name: 'analyze-text rejects overlong text', run: testAnalyzeTextOverlongText },
-    { name: 'analyze-text handles unicode and emoji safely', run: testAnalyzeTextUnicodePayload },
-    { name: 'analyze-text handles control-character payload safely', run: testAnalyzeTextControlChars },
-    { name: 'analyze-text handles html payload safely', run: testAnalyzeTextHtmlPayload },
-    { name: 'analyze-text handles injection-like payload safely', run: testAnalyzeTextInjectionPayload },
-    { name: 'analyze-text malformed json is rejected safely', run: testAnalyzeTextMalformedJson },
-    { name: 'analyze-text wrong content-type is handled safely', run: testAnalyzeTextWrongContentType },
-    { name: 'analyze-text form-urlencoded content-type is handled safely', run: testAnalyzeTextFormUrlEncoded },
-    { name: 'arbitrage happy path', run: testArbitrageHappyPath },
-    { name: 'arbitrage rejects invalid minSpread', run: testArbitrageInvalidMinSpread },
-    { name: 'arbitrage rejects invalid minConfidence', run: testArbitrageInvalidMinConfidence },
-    { name: 'arbitrage rejects invalid limit', run: testArbitrageInvalidLimit },
-    { name: 'arbitrage handles duplicate query params safely', run: testArbitrageDuplicateQueryParams },
-    { name: 'arbitrage category filter echoes correctly', run: testArbitrageCategoryFilter },
-    { name: 'movers happy path', run: testMoversHappyPath },
-    { name: 'movers rejects invalid minChange', run: testMoversInvalidMinChange },
-    { name: 'movers rejects invalid limit', run: testMoversInvalidLimit },
-    { name: 'movers category filter echoes correctly', run: testMoversCategoryFilter },
-    { name: 'feed happy path', run: testFeedHappyPath },
-    { name: 'feed rejects invalid category', run: testFeedInvalidCategory },
-    { name: 'feed rejects invalid minUrgency', run: testFeedInvalidMinUrgency },
-    { name: 'feed rejects invalid limit', run: testFeedInvalidLimit },
-    { name: 'feed rejects invalid since timestamp', run: testFeedInvalidSince },
-    { name: 'feed handles duplicate query params safely', run: testFeedDuplicateQueryParams },
-    { name: 'feed cursor pagination is stable', run: testFeedCursorPagination },
-    { name: 'feed repeated request stability', run: testFeedRepeatedRequestStability },
-    { name: 'feed oversized client id is handled safely', run: testFeedOversizedClientId },
-    { name: 'feed special client id is handled safely', run: testFeedSpecialClientId },
-    { name: 'feed OPTIONS preflight', run: testFeedOptions },
-    { name: 'feed stats happy path', run: testFeedStatsHappyPath },
-    { name: 'feed accounts contract', run: testFeedAccounts },
-    { name: 'wallet activity happy path', run: testWalletActivityHappyPath },
-    { name: 'wallet activity rejects invalid wallet', run: testWalletActivityInvalidWallet },
-    { name: 'wallet activity rejects invalid limit', run: testWalletActivityInvalidLimit },
-    { name: 'wallet activity rejects invalid since', run: testWalletActivityInvalidSince },
-    { name: 'wallet activity OPTIONS preflight', run: testWalletActivityOptions },
-    { name: 'wallet positions happy path', run: testWalletPositionsHappyPath },
-    { name: 'wallet positions rejects invalid wallet', run: testWalletPositionsInvalidWallet },
-    { name: 'wallet positions rejects invalid limit', run: testWalletPositionsInvalidLimit },
-    { name: 'wallet positions rejects invalid minValue', run: testWalletPositionsInvalidMinValue },
-    { name: 'wallet positions OPTIONS preflight', run: testWalletPositionsOptions },
-    { name: 'sdk wallet activity surfaces validation errors', run: testSdkWalletActivityInvalidWallet },
-    { name: 'sdk wallet positions surfaces validation errors', run: testSdkWalletPositionsInvalidWallet },
-    { name: 'cache-control headers are present on cacheable endpoints', run: testCacheHeaders },
-    { name: 'error responses do not leak sensitive internals', run: testErrorLeakage },
-  ];
+before(async () => {
+  logRunConfig();
+  await logPreviewBootstrap();
+});
 
-  if (ADMIN_KEY) {
-    tests.push({ name: 'usage audit endpoint reflects caller traffic', run: testUsageAudit });
-    tests.push({ name: 'usage audit rejects invalid admin key', run: testUsageAuditInvalidAdminKey });
-    tests.push({ name: 'usage audit bearer auth works or fails safely', run: testUsageAuditBearerAuth });
-    tests.push({ name: 'usage audit handles mixed auth headers safely', run: testUsageAuditMixedHeaders });
-    tests.push({ name: 'usage audit records caller traffic consistently', run: testUsageAuditConsistency });
-  } else {
-    tests.push({ name: 'usage audit rejects missing admin key', run: testUsageAuditMissingAdminKey });
-  }
+test('health endpoint contract', testOptions(), runAgentApiCase(testHealthEndpoint));
+test('sdk health smoke test', testOptions(), runAgentApiCase(testSdkHealth));
+test('health response headers', testOptions(), runAgentApiCase(testHealthHeaders));
+test('method matrix for public endpoints', testOptions(), runAgentApiCase(testMethodMatrix));
+test('analyze-text OPTIONS preflight', testOptions(), runAgentApiCase(testAnalyzeTextOptions));
+test('analyze-text happy path', testOptions(), runAgentApiCase(testAnalyzeTextHappyPath));
+test('analyze-text accepts no-match text gracefully', testOptions(), runAgentApiCase(testAnalyzeTextNoMatch));
+test('analyze-text rejects GET', testOptions(), runAgentApiCase(testAnalyzeTextMethodGuard));
+test('analyze-text rejects missing text', testOptions(), runAgentApiCase(testAnalyzeTextMissingText));
+test('analyze-text rejects empty string', testOptions(), runAgentApiCase(testAnalyzeTextEmptyString));
+test('analyze-text handles whitespace-only text safely', testOptions(), runAgentApiCase(testAnalyzeTextWhitespaceOnly));
+test('analyze-text rejects null body payload', testOptions(), runAgentApiCase(testAnalyzeTextNullBody));
+test('analyze-text rejects array body payload', testOptions(), runAgentApiCase(testAnalyzeTextArrayBody));
+test('analyze-text rejects object text payload', testOptions(), runAgentApiCase(testAnalyzeTextObjectText));
+test('analyze-text rejects NaN minConfidence', testOptions(), runAgentApiCase(testAnalyzeTextNaNMinConfidence));
+test('analyze-text rejects Infinity minConfidence', testOptions(), runAgentApiCase(testAnalyzeTextInfinityMinConfidence));
+test('analyze-text rejects invalid minConfidence', testOptions(), runAgentApiCase(testAnalyzeTextInvalidMinConfidence));
+test('analyze-text rejects invalid maxResults', testOptions(), runAgentApiCase(testAnalyzeTextInvalidMaxResults));
+test('analyze-text rejects overlong text', testOptions(), runAgentApiCase(testAnalyzeTextOverlongText));
+test('analyze-text handles unicode and emoji safely', testOptions(), runAgentApiCase(testAnalyzeTextUnicodePayload));
+test('analyze-text handles control-character payload safely', testOptions(), runAgentApiCase(testAnalyzeTextControlChars));
+test('analyze-text handles html payload safely', testOptions(), runAgentApiCase(testAnalyzeTextHtmlPayload));
+test('analyze-text handles injection-like payload safely', testOptions(), runAgentApiCase(testAnalyzeTextInjectionPayload));
+test('analyze-text malformed json is rejected safely', testOptions(), runAgentApiCase(testAnalyzeTextMalformedJson));
+test('analyze-text wrong content-type is handled safely', testOptions(), runAgentApiCase(testAnalyzeTextWrongContentType));
+test('analyze-text form-urlencoded content-type is handled safely', testOptions(), runAgentApiCase(testAnalyzeTextFormUrlEncoded));
+test('arbitrage happy path', testOptions(), runAgentApiCase(testArbitrageHappyPath));
+test('arbitrage rejects invalid minSpread', testOptions(), runAgentApiCase(testArbitrageInvalidMinSpread));
+test('arbitrage rejects invalid minConfidence', testOptions(), runAgentApiCase(testArbitrageInvalidMinConfidence));
+test('arbitrage rejects invalid limit', testOptions(), runAgentApiCase(testArbitrageInvalidLimit));
+test('arbitrage handles duplicate query params safely', testOptions(), runAgentApiCase(testArbitrageDuplicateQueryParams));
+test('arbitrage category filter echoes correctly', testOptions(), runAgentApiCase(testArbitrageCategoryFilter));
+test('movers happy path', testOptions(), runAgentApiCase(testMoversHappyPath));
+test('movers rejects invalid minChange', testOptions(), runAgentApiCase(testMoversInvalidMinChange));
+test('movers rejects invalid limit', testOptions(), runAgentApiCase(testMoversInvalidLimit));
+test('movers category filter echoes correctly', testOptions(), runAgentApiCase(testMoversCategoryFilter));
+test('feed happy path', testOptions(), runAgentApiCase(testFeedHappyPath));
+test('feed rejects invalid category', testOptions(), runAgentApiCase(testFeedInvalidCategory));
+test('feed rejects invalid minUrgency', testOptions(), runAgentApiCase(testFeedInvalidMinUrgency));
+test('feed rejects invalid limit', testOptions(), runAgentApiCase(testFeedInvalidLimit));
+test('feed rejects invalid since timestamp', testOptions(), runAgentApiCase(testFeedInvalidSince));
+test('feed handles duplicate query params safely', testOptions(), runAgentApiCase(testFeedDuplicateQueryParams));
+test('feed cursor pagination is stable', testOptions(), runAgentApiCase(testFeedCursorPagination));
+test('feed repeated request stability', testOptions(), runAgentApiCase(testFeedRepeatedRequestStability));
+test('feed oversized client id is handled safely', testOptions(), runAgentApiCase(testFeedOversizedClientId));
+test('feed special client id is handled safely', testOptions(), runAgentApiCase(testFeedSpecialClientId));
+test('feed OPTIONS preflight', testOptions(), runAgentApiCase(testFeedOptions));
+test('feed stats happy path', testOptions(), runAgentApiCase(testFeedStatsHappyPath));
+test('feed accounts contract', testOptions(), runAgentApiCase(testFeedAccounts));
+test('wallet activity happy path', testOptions(), runAgentApiCase(testWalletActivityHappyPath));
+test('wallet activity rejects invalid wallet', testOptions(), runAgentApiCase(testWalletActivityInvalidWallet));
+test('wallet activity rejects invalid limit', testOptions(), runAgentApiCase(testWalletActivityInvalidLimit));
+test('wallet activity rejects invalid since', testOptions(), runAgentApiCase(testWalletActivityInvalidSince));
+test('wallet activity OPTIONS preflight', testOptions(), runAgentApiCase(testWalletActivityOptions));
+test('wallet positions happy path', testOptions(), runAgentApiCase(testWalletPositionsHappyPath));
+test('wallet positions rejects invalid wallet', testOptions(), runAgentApiCase(testWalletPositionsInvalidWallet));
+test('wallet positions rejects invalid limit', testOptions(), runAgentApiCase(testWalletPositionsInvalidLimit));
+test('wallet positions rejects invalid minValue', testOptions(), runAgentApiCase(testWalletPositionsInvalidMinValue));
+test('wallet positions OPTIONS preflight', testOptions(), runAgentApiCase(testWalletPositionsOptions));
+test('sdk wallet activity surfaces validation errors', testOptions(), runAgentApiCase(testSdkWalletActivityInvalidWallet));
+test('sdk wallet positions surfaces validation errors', testOptions(), runAgentApiCase(testSdkWalletPositionsInvalidWallet));
+test('cache-control headers are present on cacheable endpoints', testOptions(), runAgentApiCase(testCacheHeaders));
+test('error responses do not leak sensitive internals', testOptions(), runAgentApiCase(testErrorLeakage));
+test('usage audit endpoint reflects caller traffic', testOptions(ADMIN_KEY_REQUIRED_SKIP), runAgentApiCase(testUsageAudit));
+test('usage audit rejects invalid admin key', testOptions(ADMIN_KEY_REQUIRED_SKIP), runAgentApiCase(testUsageAuditInvalidAdminKey));
+test('usage audit bearer auth works or fails safely', testOptions(ADMIN_KEY_REQUIRED_SKIP), runAgentApiCase(testUsageAuditBearerAuth));
+test('usage audit handles mixed auth headers safely', testOptions(ADMIN_KEY_REQUIRED_SKIP), runAgentApiCase(testUsageAuditMixedHeaders));
+test('usage audit records caller traffic consistently', testOptions(ADMIN_KEY_REQUIRED_SKIP), runAgentApiCase(testUsageAuditConsistency));
+test('usage audit rejects missing admin key', testOptions(ADMIN_KEY_MISSING_SKIP), runAgentApiCase(testUsageAuditMissingAdminKey));
+test('warm latency benchmark', testOptions(PERF_SKIP), runAgentApiCase(testWarmLatencyBenchmark));
+test('best-effort cold start probe', testOptions(PERF_SKIP), runAgentApiCase(testColdStartProbe));
+test('concurrent request stability', testOptions(STRESS_SKIP), runAgentApiCase(testConcurrentRequestStability));
+test('burst traffic stability', testOptions(STRESS_SKIP), runAgentApiCase(testBurstTrafficStability));
 
-  if (INCLUDE_PERF) {
-    tests.push({ name: 'warm latency benchmark', run: testWarmLatencyBenchmark });
-    tests.push({ name: 'best-effort cold start probe', run: testColdStartProbe });
-  }
-
-  if (INCLUDE_STRESS) {
-    tests.push({ name: 'concurrent request stability', run: testConcurrentRequestStability });
-    tests.push({ name: 'burst traffic stability', run: testBurstTrafficStability });
-  }
-
-  let failures = 0;
-  let warnings = 0;
-
+function logRunConfig(): void {
   console.log(`Base URL: ${BASE_URL}`);
   console.log(`Client ID: ${CLIENT_ID}`);
   console.log(`Timeout: ${TIMEOUT_MS}ms`);
+  console.log(`Case timeout: ${CASE_TIMEOUT_MS}ms`);
   console.log(`Vercel preview bypass: ${VERCEL_AUTOMATION_BYPASS_SECRET ? 'enabled' : 'disabled'}`);
   console.log('');
+}
 
-  await logPreviewBootstrap();
+function testOptions(skip: false | string = false): typeof AGENT_API_TEST_OPTIONS & { skip?: string | false } {
+  return skip ? { ...AGENT_API_TEST_OPTIONS, skip } : AGENT_API_TEST_OPTIONS;
+}
 
-  for (const test of tests) {
+function runAgentApiCase(run: AgentApiTestCaseRun): (context: TestContext) => Promise<void> {
+  return async (context: TestContext): Promise<void> => {
     try {
-      const result = await test.run();
-      const prefix = result.level === 'pass' ? 'PASS' : result.level === 'warn' ? 'WARN' : 'FAIL';
-      console.log(`[${prefix}] ${test.name} - ${result.detail}`);
-      if (result.level === 'warn') warnings++;
-      if (result.level === 'fail') failures++;
+      const result = await run();
+      context.diagnostic(`${result.level.toUpperCase()}: ${result.detail}`);
+
+      if (result.level === 'fail') {
+        throw new Error(result.detail);
+      }
     } catch (error) {
-      failures++;
-      console.log(`[FAIL] ${test.name} - ${toErrorMessage(error)}`);
+      throw new Error(toErrorMessage(error));
     }
-  }
-
-  console.log('');
-  console.log(`Summary: ${tests.length - failures - warnings} passed, ${warnings} warnings, ${failures} failed`);
-
-  if (failures > 0) {
-    process.exitCode = 1;
-  }
+  };
 }
 
 async function logPreviewBootstrap(): Promise<void> {
@@ -1838,5 +1838,3 @@ function formatStatusSummary(summary: Record<string, number>): string {
     .map(([status, count]) => `${status}x${count}`)
     .join(', ');
 }
-
-void main();
