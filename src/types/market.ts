@@ -27,6 +27,18 @@ export interface MarketMatch {
   matchedKeywords: string[];
 }
 
+export interface CanonicalEvent {
+  id: string;
+  title: string;
+  normalizedTitle: string;
+  category?: string;
+  markets: {
+    polymarket?: Market;
+    kalshi?: Market;
+  };
+}
+
+
 export interface ArbitrageOpportunity {
   polymarket: Market;
   kalshi: Market;

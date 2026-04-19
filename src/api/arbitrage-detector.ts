@@ -260,14 +260,25 @@ function priceBundle(poly: Market, kalshi: Market, feesAndSlippage: number): Bun
 }
 
 function candidatesFor(poly: Market, kalshiByCategory: Map<string, Market[]>): Market[] {
+
   if (poly.category === 'other') {
     return kalshiByCategory.get('other') ?? [];
   }
-
+  
+  const sameCategory = kalshiByCategory.get(poly.category) ?? [];
+  const fallback = (kalshiByCategory.get('other') ?? []).slice(0, 5);
+  
+  return [...sameCategory, ...fallback];
+  /*
   return [
+    
     ...(kalshiByCategory.get(poly.category) ?? []),
     ...(kalshiByCategory.get('other') ?? []),
+    
+   
   ];
+  */
+  //return kalshiByCategory.get(poly.category) ?? [];
 }
 
 /**
@@ -281,7 +292,7 @@ function candidatesFor(poly: Market, kalshiByCategory: Map<string, Market[]>): M
  */
 export function detectArbitrage(
   markets: Market[],
-  minSpread: number = 0.03,
+  minSpread: number = 0.01, //FOR DEBUG: FROM 0.03 TO 0.01
   feesAndSlippage: number = DEFAULT_FEES_AND_SLIPPAGE,
 ): ArbitrageOpportunity[] {
   const opportunities: ArbitrageOpportunity[] = [];
@@ -300,10 +311,24 @@ export function detectArbitrage(
   for (const poly of polymarkets) {
     for (const kalshi of candidatesFor(poly, kalshiByCategory)) {
       const similarity = areMarketsSimilar(poly, kalshi);
-      if (!similarity.isSimilar) continue;
+      //DEBUGGING
+      console.log("[Arbitrage] pair:", poly.title, kalshi.title);
+      console.log("[Arbitrage] similarity:", similarity.confidence, similarity.reason);
+
+      if (!similarity.isSimilar) {
+        //DEBUG LOGGING
+        console.log("[Arbitrage] rejected pair:", poly.title, kalshi.title);
+        continue;
+      }
 
       const bestBundle = priceBundle(poly, kalshi, feesAndSlippage)
         .sort((a, b) => b.edge - a.edge)[0];
+
+      //DEBUG
+
+      console.log("[Arbitrage] candidate edge:", bestBundle.edge);
+      console.log("[Arbitrage] costPerBundle:", bestBundle.costPerBundle);
+      console.log("[Arbitrage] direction:", bestBundle.direction);
 
       if (bestBundle.edge < minSpread) continue;
 
