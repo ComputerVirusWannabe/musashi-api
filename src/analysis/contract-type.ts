@@ -78,3 +78,65 @@ export function detectContractType(market: Market): ContractType {
   // 5. Generic binary yes/no
   return 'BINARY_OUTCOME';
 }
+
+/**
+ * Return a compatibility score in [0, 1] between two contract types.
+ *
+ * A score of 0 means the pair is structurally incompatible and should be
+ * hard-rejected.  Any positive score is used as a penalty multiplier in the
+ * confidence formula so that type mismatches reduce confidence rather than
+ * eliminating candidates outright.
+ *
+ * The only pair that retains a hard-zero is RANGE_COUNT ↔ EVENT_MATCH_OUTCOME:
+ * a count-in-range contract cannot meaningfully map onto a head-to-head winner.
+ */
+export function contractTypeCompatibility(a: ContractType, b: ContractType): number {
+  if (a === b) return 1.0;
+
+  // Normalise order so we only need one entry per unordered pair.
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+
+  switch (`${lo}|${hi}`) {
+    // TIME_WINDOW_BINARY ↔ BINARY_OUTCOME: both are generic YES/NO, effectively
+    // the same structure.  The detector in arbitrage-detector.ts also overrides
+    // this pair to 1.0 via the BINARY_COMPATIBLE_TYPES set, but we return 0.8
+    // here for completeness and to support callers that use this function directly.
+    case 'BINARY_OUTCOME|TIME_WINDOW_BINARY':    return 0.8;
+
+    // A generic YES/NO contract and a head-to-head winner are often the same
+    // market expressed differently across platforms.
+    case 'BINARY_OUTCOME|EVENT_MATCH_OUTCOME':   return 0.6;
+
+    // A generic YES/NO can be a threshold contract with the threshold omitted
+    // from the title on one platform.
+    case 'BINARY_OUTCOME|THRESHOLD_PRICE':       return 0.5;
+
+    // A time-window binary and a threshold/price contract share a deadline
+    // structure and are semantically close.
+    case 'THRESHOLD_PRICE|TIME_WINDOW_BINARY':   return 0.6;
+
+    // A named match outcome paired with a time-window binary: plausible when
+    // one platform qualifies the outcome with a deadline.
+    case 'EVENT_MATCH_OUTCOME|TIME_WINDOW_BINARY': return 0.4;
+
+    // A price-threshold contract paired with a match-outcome is a stretch but
+    // still partially comparable (e.g. score milestones in a game).
+    case 'EVENT_MATCH_OUTCOME|THRESHOLD_PRICE':  return 0.2;
+
+    // A numeric range and a binary outcome: one platform may bucket the same
+    // event into ranges while the other offers a single YES/NO.
+    case 'BINARY_OUTCOME|RANGE_COUNT':           return 0.35;
+
+    // Numeric range and price threshold share quantitative structure.
+    case 'RANGE_COUNT|THRESHOLD_PRICE':          return 0.5;
+
+    // Numeric range with a time-window qualifier: partial structural overlap.
+    case 'RANGE_COUNT|TIME_WINDOW_BINARY':       return 0.35;
+
+    // RANGE_COUNT ↔ EVENT_MATCH_OUTCOME: a count-in-range cannot map onto a
+    // head-to-head winner.  Hard-reject (0).
+    case 'EVENT_MATCH_OUTCOME|RANGE_COUNT':      return 0.0;
+
+    default: return 0.0;
+  }
+}

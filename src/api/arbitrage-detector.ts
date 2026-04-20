@@ -2,7 +2,7 @@
 // Matches equivalent Polymarket/Kalshi contracts and prices covered YES/NO bundles.
 
 import { Market, ArbitrageOpportunity } from '../types/market';
-import { detectContractType } from '../analysis/contract-type';
+import { detectContractType, contractTypeCompatibility } from '../analysis/contract-type';
 
 const STOP_WORDS = new Set([
   'will', 'the', 'a', 'an', 'in', 'on', 'at', 'by', 'for', 'to', 'of',
@@ -169,6 +169,18 @@ function calculateKeywordOverlap(market1: Market, market2: Market): number {
   return intersectionSize(new Set(market1.keywords), new Set(market2.keywords));
 }
 
+// Minimum composite confidence required to accept a pair as a match.
+// 0.4 is exploratory: more coverage with acceptable noise.
+const MIN_MATCH_CONFIDENCE = 0.4;
+
+// Per-field conflict penalties subtracted from the base confidence score.
+// Conflicts reduce confidence but no longer hard-reject the pair.
+const PENALTY_YEAR    = 0.35;
+const PENALTY_DATE    = 0.25;
+const PENALTY_NUMBER  = 0.30;
+const PENALTY_OUTCOME = 0.20;
+const PENALTY_SCOPE   = 0.20;
+
 function areMarketsSimilar(poly: Market, kalshi: Market): MatchResult {
   const strictCategoryMatch =
     poly.category === kalshi.category &&
@@ -180,53 +192,78 @@ function areMarketsSimilar(poly: Market, kalshi: Market): MatchResult {
     return { isSimilar: false, confidence: 0, reason: 'Different categories' };
   }
 
-  // Gate 2: Contract structure type must match.
-  // e.g. a numeric-range contract can never be equivalent to a head-to-head
-  // match-outcome contract, regardless of how similar their titles appear.
-  // TIME_WINDOW_BINARY is structurally compatible with BINARY_OUTCOME: both
-  // settle to a single YES/NO outcome; the time-window qualifier is a detail
-  // that one platform may omit in its title while the other includes it.
+  // Gate 2: Contract structure type compatibility.
+  // Structurally incompatible types (e.g. RANGE_COUNT vs EVENT_MATCH_OUTCOME,
+  // score 0) are still hard-rejected.  All other pairs receive a positive type
+  // score that acts as a weight in the composite confidence formula.
   const polyType = detectContractType(poly);
   const kalshiType = detectContractType(kalshi);
-  const typesCompatible =
-    polyType === kalshiType ||
-    (BINARY_COMPATIBLE_TYPES.has(polyType) && BINARY_COMPATIBLE_TYPES.has(kalshiType));
-  if (!typesCompatible) {
-    return { isSimilar: false, confidence: 0, reason: `Different contract types (${polyType} vs ${kalshiType})` };
+  const typeScore = contractTypeCompatibility(polyType, kalshiType);
+  // Also treat types that are both in the binary-compatible set as fully
+  // compatible (TIME_WINDOW_BINARY ↔ BINARY_OUTCOME).
+  const effectiveTypeScore =
+    typeScore === 0 && BINARY_COMPATIBLE_TYPES.has(polyType) && BINARY_COMPATIBLE_TYPES.has(kalshiType)
+      ? 1.0
+      : typeScore;
+  if (effectiveTypeScore === 0) {
+    return {
+      isSimilar: false,
+      confidence: 0,
+      reason: `Incompatible contract types (${polyType} vs ${kalshiType})`,
+    };
   }
 
   const polySig = signature(poly);
   const kalshiSig = signature(kalshi);
 
+  // Accumulate penalties for field conflicts instead of hard-rejecting.
+  // Each mismatch reduces confidence; a single mismatch no longer kills the pair.
+  let penaltyTotal = 0;
+  const penaltyReasons: string[] = [];
+
   if (hasConflict(polySig.years, kalshiSig.years)) {
-    return { isSimilar: false, confidence: 0, reason: 'Different contract years' };
+    penaltyTotal += PENALTY_YEAR;
+    penaltyReasons.push('year mismatch');
   }
 
   if (hasConflict(polySig.dates, kalshiSig.dates)) {
-    return { isSimilar: false, confidence: 0, reason: 'Different contract dates' };
+    penaltyTotal += PENALTY_DATE;
+    penaltyReasons.push('date mismatch');
   }
 
   if (hasConflict(polySig.numbers, kalshiSig.numbers)) {
-    return { isSimilar: false, confidence: 0, reason: 'Different numeric thresholds' };
+    penaltyTotal += PENALTY_NUMBER;
+    penaltyReasons.push('numeric threshold mismatch');
   }
 
   if (hasConflict(polySig.outcomes, kalshiSig.outcomes)) {
-    return { isSimilar: false, confidence: 0, reason: 'Different outcome wording' };
+    penaltyTotal += PENALTY_OUTCOME;
+    penaltyReasons.push('outcome wording mismatch');
   }
 
   if (hasConflict(polySig.scopes, kalshiSig.scopes)) {
-    return { isSimilar: false, confidence: 0, reason: 'Different contract scope' };
+    penaltyTotal += PENALTY_SCOPE;
+    penaltyReasons.push('scope mismatch');
   }
 
   const titleSim = jaccard(polySig.terms, kalshiSig.terms);
   const keywordOverlap = calculateKeywordOverlap(poly, kalshi);
   const sharedTerms = intersectionSize(polySig.terms, kalshiSig.terms);
 
-  let confidence = Math.max(titleSim, Math.min(keywordOverlap / 8, 0.85));
+  const semanticScore = Math.max(titleSim, Math.min(keywordOverlap / 8, 0.85));
+
+  // Base confidence: weighted semantic + type score, minus accumulated penalties.
+  // Floored at 0 so penalties cannot make confidence negative.
+  // penaltyTotal is capped at 0.6 so that even when every field conflicts a
+  // pair with strong semantic + type alignment can still reach the threshold.
+  const cappedPenalty = Math.min(penaltyTotal, 0.6);
+  let confidence = Math.max(0, semanticScore * 0.6 + effectiveTypeScore * 0.4 - cappedPenalty);
+
   const blockersMatched =
     (polySig.years.size === 0 || kalshiSig.years.size === 0 || intersectionSize(polySig.years, kalshiSig.years) > 0) &&
     (polySig.numbers.size === 0 || kalshiSig.numbers.size === 0 || intersectionSize(polySig.numbers, kalshiSig.numbers) > 0);
 
+  // Strong-match fast paths: floor confidence at a high value when hard signals agree.
   if (strictCategoryMatch && blockersMatched && titleSim >= 0.45) {
     confidence = Math.max(confidence, 0.75);
     return {
@@ -254,7 +291,14 @@ function areMarketsSimilar(poly: Market, kalshi: Market): MatchResult {
     };
   }
 
-  return { isSimilar: false, confidence: 0, reason: 'Insufficient contract equivalence' };
+  // Graded match: accept any pair whose composite score meets the minimum threshold.
+  if (confidence >= MIN_MATCH_CONFIDENCE) {
+    const parts = [`Graded match (score: ${confidence.toFixed(2)})`];
+    if (penaltyReasons.length > 0) parts.push(`penalties: ${penaltyReasons.join(', ')}`);
+    return { isSimilar: true, confidence, reason: parts.join('; ') };
+  }
+
+  return { isSimilar: false, confidence, reason: 'Score below match threshold' };
 }
 
 function buyYesPrice(market: Market): number {
@@ -313,7 +357,7 @@ function candidatesFor(poly: Market, kalshiByCategory: Map<string, Market[]>): M
  */
 export function detectArbitrage(
   markets: Market[],
-  minSpread: number = 0.03, //FOR DEBUG: FROM 0.03 TO 0.01 to be more inclusive in testing
+  minSpread: number = 0.03, //FOR DEBUG: FROM 0.03 TO 0.01
   feesAndSlippage: number = DEFAULT_FEES_AND_SLIPPAGE,
 ): ArbitrageOpportunity[] {
   const opportunities: ArbitrageOpportunity[] = [];

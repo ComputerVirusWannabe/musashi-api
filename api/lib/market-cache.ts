@@ -199,8 +199,8 @@ export async function getArbitrage(minSpread: number = 0.03): Promise<ArbitrageO
   const markets = await getMarkets();
   const now = Date.now();
 
-  // Recompute if cache is stale
-  if (cachedArbitrage.length === 0 || (now - arbCacheTimestamp) >= ARB_CACHE_TTL_MS) {
+  // Recompute if cache is stale or never populated
+  if (arbCacheTimestamp === 0 || (now - arbCacheTimestamp) >= ARB_CACHE_TTL_MS) {
     console.log('[Arbitrage Cache] Computing arbitrage opportunities...');
     // Cache with low threshold (0.01) so we can filter client-side
     cachedArbitrage = detectArbitrage(markets, 0.01);
