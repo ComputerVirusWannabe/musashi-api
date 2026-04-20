@@ -1,7 +1,8 @@
+import { Market, CanonicalEvent } from '../types/market';
+import { detectContractType } from './contract-type';
+
 // Event canonicalization: group equivalent Polymarket and Kalshi markets
 // into a single CanonicalEvent representing the same real-world bet.
-
-import { Market, CanonicalEvent } from '../types/market';
 
 /**
  * Normalize raw market title text into a comparable form by lowercasing,
@@ -63,16 +64,32 @@ export function matchEvents(
   const events: CanonicalEvent[] = [];
   const usedKalshi = new Set<string>();
 
+  // Precompute type and signature for each Kalshi market so we avoid
+  // recomputing them in the O(n×m) inner loop.
+  const kalshiMeta = kalshi.map(k => ({
+    market: k,
+    type: detectContractType(k),
+    sig: getMarketSignature(k),
+  }));
+
   for (const poly of polymarket) {
     const polySig = getMarketSignature(poly);
+    const polyType = detectContractType(poly);
 
     let bestMatch: { market: Market; score: number } | null = null;
 
-    for (const k of kalshi) {
-      if (usedKalshi.has(k.id)) continue;
-      const score = jaccardSimilarity(polySig, getMarketSignature(k));
+    for (const km of kalshiMeta) {
+      if (usedKalshi.has(km.market.id)) continue;
+
+      // Gate 1: Skip markets with incompatible prediction structures.
+      // There is no scenario in which a RANGE_COUNT contract on one platform
+      // represents the same real-world event as an EVENT_MATCH_OUTCOME contract
+      // on another platform.
+      if (km.type !== polyType) continue;
+
+      const score = jaccardSimilarity(polySig, km.sig);
       if (score >= threshold && (!bestMatch || score > bestMatch.score)) {
-        bestMatch = { market: k, score };
+        bestMatch = { market: km.market, score };
       }
     }
 

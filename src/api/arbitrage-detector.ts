@@ -2,6 +2,7 @@
 // Matches equivalent Polymarket/Kalshi contracts and prices covered YES/NO bundles.
 
 import { Market, ArbitrageOpportunity } from '../types/market';
+import { detectContractType } from '../analysis/contract-type';
 
 const STOP_WORDS = new Set([
   'will', 'the', 'a', 'an', 'in', 'on', 'at', 'by', 'for', 'to', 'of',
@@ -161,6 +162,14 @@ function areMarketsSimilar(poly: Market, kalshi: Market): MatchResult {
 
   if (!strictCategoryMatch && !categoryUnknown) {
     return { isSimilar: false, confidence: 0, reason: 'Different categories' };
+  }
+  // Gate 2: Contract structure type must match.
+  // e.g. a numeric-range contract can never be equivalent to a head-to-head
+  // match-outcome contract, regardless of how similar their titles appear.
+  const polyType = detectContractType(poly);
+  const kalshiType = detectContractType(kalshi);
+  if (polyType !== kalshiType) {
+    return { isSimilar: false, confidence: 0, reason: `Different contract types (${polyType} vs ${kalshiType})` };
   }
 
   const polySig = signature(poly);
